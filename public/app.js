@@ -155,7 +155,10 @@ function nav(on = "home") {
   const reqBadge = me?.incomingRequestsCount
     ? `<span class="tab-badge warning" style="margin-left:4px">${me.incomingRequestsCount}</span>`
     : "";
-  return `<header class="topbar"><a class="brand" href="#home"><span class="brandmark">♫</span>sync<em>&</em>share</a><nav class="nav"><a href="#corner" class="${on === "corner" ? "active" : ""}">Your Corner</a><a href="#people" class="${on === "people" ? "active" : ""}">Find Friends${reqBadge}</a><a href="#discover" class="${on === "discover" ? "active" : ""}">Rooms</a><a href="#profile" class="profile-chip">${esc(me.name)}</a><button id="logout">Log out</button></nav></header>`;
+  const inviteBadge = me?.incomingInvitesCount
+    ? `<span class="tab-badge" style="margin-left:4px;background:#6366f1;color:#fff">${me.incomingInvitesCount}</span>`
+    : "";
+  return `<header class="topbar"><a class="brand" href="#home"><span class="brandmark">♫</span>sync<em>&</em>share</a><nav class="nav"><a href="#corner" class="${on === "corner" ? "active" : ""}">Your Corner</a><a href="#people" class="${on === "people" ? "active" : ""}">Find Friends${reqBadge}</a><a href="#discover" class="${on === "discover" ? "active" : ""}">Rooms${inviteBadge}</a><a href="#profile" class="profile-chip">${esc(me.name)}</a><button id="logout">Log out</button></nav></header>`;
 }
 function frame(content, on) {
   app.innerHTML = `<div class="shell">${nav(on)}<main class="main">${content}</main></div>`;
@@ -258,6 +261,87 @@ function bindFriendActions(onDone) {
     };
   });
 }
+function bindRoomJoinActions(onDone) {
+  document.querySelectorAll("[data-request-room-join]").forEach((btn) => {
+    btn.onclick = async () => {
+      const roomId = btn.dataset.requestRoomJoin;
+      btn.disabled = true;
+      try {
+        await api(`/rooms/${roomId}/join-request`, { method: "POST" });
+        toast("Join request sent to host!");
+        if (onDone) await onDone();
+        else render();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  });
+  document.querySelectorAll("[data-cancel-room-join]").forEach((btn) => {
+    btn.onclick = async () => {
+      const roomId = btn.dataset.cancelRoomJoin;
+      btn.disabled = true;
+      try {
+        await api(`/rooms/${roomId}/join-request`, { method: "DELETE" });
+        toast("Join request cancelled");
+        if (onDone) await onDone();
+        else render();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  });
+}
+async function openInviteModal(roomId, roomName, roomCode) {
+  try {
+    const d = await api(`/rooms/${roomId}/invite-candidates`);
+    const candidates = d.candidates || [];
+    const html = `
+      <div style="min-width:300px;max-width:460px">
+        <h2>Invite Friends</h2>
+        <p class="muted" style="font-size:12px;margin-bottom:12px">Invite friends to listen together in <b>${esc(roomName)}</b>.</p>
+        ${roomCode ? `<div class="card" style="padding:10px 14px;margin-bottom:14px;background:#151d28;border:1px solid #2a3b50"><small class="muted" style="display:block;margin-bottom:4px">Private Room Code:</small><div class="invite" style="font-size:16px;letter-spacing:1px">${esc(roomCode)}</div></div>` : ""}
+        <div class="people-list" style="max-height:280px;overflow-y:auto;margin-bottom:14px">
+          ${candidates.map((c) => `
+            <div class="person-row" style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+              ${avatar(c)}
+              <div class="grow">
+                <b>${esc(c.name)}</b>
+                <small>@${esc(c.username)}</small>
+              </div>
+              <div>
+                ${c.inRoom ? '<span class="badge">IN ROOM</span>' : c.invited ? '<button class="button secondary small" disabled style="opacity:0.6">Invited ✓</button>' : `<button class="button small" data-send-invite="${esc(c.id)}">Invite</button>`}
+              </div>
+            </div>
+          `).join("") || '<div class="empty">No friends found. Add friends in Find Friends to invite them!</div>'}
+        </div>
+      </div>
+    `;
+    modal(html);
+    document.querySelectorAll("[data-send-invite]").forEach((btn) => {
+      btn.onclick = async () => {
+        const targetUserId = btn.dataset.sendInvite;
+        btn.disabled = true;
+        btn.textContent = "Sending...";
+        try {
+          await api(`/rooms/${roomId}/invite`, {
+            method: "POST",
+            body: JSON.stringify({ targetUserId }),
+          });
+          toast("Invite sent!");
+          btn.outerHTML = '<button class="button secondary small" disabled style="opacity:0.6">Invited ✓</button>';
+        } catch (err) {
+          toast(err.message);
+          btn.disabled = false;
+          btn.textContent = "Invite";
+        }
+      };
+    });
+  } catch (err) {
+    toast(err.message);
+  }
+}
 async function home() {
   const [rooms, people] = await Promise.all([api("/rooms"), api("/people")]);
   frame(
@@ -328,15 +412,45 @@ function modal(html, submit) {
   });
 }
 async function discover() {
-  const d = await api("/rooms"),
-    rooms = d.rooms || [],
+  const [d, invitesData] = await Promise.all([
+    api("/rooms"),
+    api("/me/invites").catch(() => ({ invites: [] })),
+  ]);
+  const rooms = d.rooms || [],
+    invites = invitesData.invites || [],
     active = rooms.filter((r) => r.status !== "closed").length;
   frame(
-    `<div class="hero"><div><span class="eyebrow">DISCOVER</span><h1>Listening rooms</h1><p>Browse rooms you can join, manage, or reopen. Join private rooms with an invitation code.</p></div><button class="button" id="create">Create a room</button></div><section class="card"><div class="card-head"><h2>Rooms</h2><span class="eyebrow">${rooms.length} ROOMS · ${active} ACTIVE</span></div><div class="room-list">${rooms.map((r) => `<div class="room-row"><div class="room-icon">♫</div><div class="grow"><b>${esc(r.name)}</b><small>${r.isPrivate ? "Private · " : ""}${r.status === "closed" ? "Closed" : `${r.members} ${r.members === 1 ? "member" : "members"} · ${esc(r.track || "No track playing")}`}</small></div>${r.status === "closed" ? (r.isHost ? `<button class="button small" data-room-start="${esc(r.id)}">Start room</button>` : '<button class="button secondary small" disabled>Closed</button>') : r.isMember ? `<button class="button small" data-open-room="${esc(r.id)}">Open room</button>` : !r.isPrivate ? `<button class="button small" data-join="${esc(r.id)}">Join room</button>` : ""}</div>`).join("") || `<div class="empty">No rooms yet. Create one to get started.</div>`}</div></section><section class="card section"><h2>Join a private room</h2><p class="muted" style="font-size:12px">Enter the invitation code shared by the host.</p><form id="inviteform" class="formrow"><input class="input" name="code" required placeholder="Invitation code"><button class="button">Join room</button></form></section>`,
+    `<div class="hero"><div><span class="eyebrow">DISCOVER</span><h1>Listening rooms</h1><p>Browse rooms you can join, manage, or reopen. Join private rooms with an invitation code.</p></div><button class="button" id="create">Create a room</button></div>${invites.length > 0 ? `<section class="card" style="margin-bottom:18px;background:#182030;border:1px solid #4f46e5;padding:16px"><div class="card-head"><h2>Room Invitations</h2><span class="badge" style="color:#a5b4fc;border-color:#6366f1">${invites.length} PENDING</span></div><p class="muted" style="font-size:12px;margin:-6px 0 14px">Your friends invited you to join their listening room.</p><div class="people-list">${invites.map((inv) => `<div class="person-row"><div class="grow"><b>${esc(inv.roomName)}</b><small>Invited by ${esc(inv.inviter?.name || "Friend")} (@${esc(inv.inviter?.username || "user")}) · ${new Date(inv.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div><div class="btn-group"><button class="button small" data-accept-invite="${esc(inv.id)}">Join Room</button><button class="button secondary small" data-decline-invite="${esc(inv.id)}">Decline</button></div></div>`).join("")}</div></section>` : ""}<section class="card"><div class="card-head"><h2>Rooms</h2><span class="eyebrow">${rooms.length} ROOMS · ${active} ACTIVE</span></div><div class="room-list">${rooms.map((r) => `<div class="room-row"><div class="room-icon">♫</div><div class="grow"><b>${esc(r.name)}</b><small>${r.isPrivate ? "Private · " : ""}${r.status === "closed" ? "Closed" : `${r.members} ${r.members === 1 ? "member" : "members"} · ${esc(r.track || "No track playing")}`}</small></div>${r.status === "closed" ? (r.isHost ? `<button class="button small" data-room-start="${esc(r.id)}">Start room</button>` : '<button class="button secondary small" disabled>Closed</button>') : r.isMember ? `<button class="button small" data-open-room="${esc(r.id)}">Open room</button>` : !r.isPrivate ? `<button class="button small" data-join="${esc(r.id)}">Join room</button>` : ""}</div>`).join("") || `<div class="empty">No rooms yet. Create one to get started.</div>`}</div></section><section class="card section"><h2>Join a private room</h2><p class="muted" style="font-size:12px">Enter the invitation code shared by the host.</p><form id="inviteform" class="formrow"><input class="input" name="code" required placeholder="Invitation code"><button class="button">Join room</button></form></section>`,
     "discover",
   );
   bindCreate();
   bindJoin();
+  document.querySelectorAll("[data-accept-invite]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const res = await api(`/invites/${btn.dataset.acceptInvite}/accept`, { method: "POST" });
+        toast("Joined room!");
+        location.hash = `#room/${res.roomId}`;
+      } catch (e) {
+        toast(e.message);
+        btn.disabled = false;
+      }
+    };
+  });
+  document.querySelectorAll("[data-decline-invite]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api(`/invites/${btn.dataset.declineInvite}/decline`, { method: "POST" });
+        toast("Invite declined");
+        await discover();
+      } catch (e) {
+        toast(e.message);
+        btn.disabled = false;
+      }
+    };
+  });
   document
     .querySelectorAll("[data-open-room]")
     .forEach(
@@ -398,8 +512,11 @@ async function profile(username) {
       headerBtn = `<button class="button" data-friend-action="request" data-id="${esc(u.id)}">+ Add Friend</button>`;
     }
   }
+  const cornerRoomHtml = d.cornerRoom
+    ? `<div class="card section" style="background:#1b2430;border:1px solid #3b82f6;padding:14px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#60a5fa;border-color:#3b82f6">CORNER ROOM</span><span style="margin-left:8px">Listening to: <b>${esc(d.cornerRoom.trackTitle || "Music")}</b> in private corner room</span></div><div class="card-actions">${d.cornerRoom.isMember ? `<a class="button small" href="#room/${esc(d.cornerRoom.id)}">Enter Room</a>` : d.cornerRoom.hasRequestedJoin ? `<button class="button secondary small" data-cancel-room-join="${esc(d.cornerRoom.id)}">⏳ Join Requested</button>` : `<button class="button small" data-request-room-join="${esc(d.cornerRoom.id)}">Request to Join</button>`}</div></div></div>`
+    : "";
   frame(
-    `<div class="profile-head">${avatar(u)}<div class="grow"><span class="eyebrow">${own ? "YOUR PROFILE" : "LISTENER PROFILE"}</span><h1>${esc(u.name)}</h1><p>@${esc(u.username)}</p></div>${headerBtn}</div><div class="grid"><section class="card"><div class="card-head"><h2>About ${own ? "you" : esc(u.name)}</h2>${own ? '<button class="button secondary small" id="edit">Edit profile</button>' : ""}</div><p class="muted" style="font-size:13px">${esc(u.bio || "No bio yet.")}</p></section><section class="card"><div class="card-head"><h2>Listening now</h2><span class="badge">${d.activity ? "SHARING" : "NOT SHARING"}</span></div>${d.activity ? `<p>${esc(d.activity.title || "YouTube video")}<small class="subline">${d.activity.playback === "playing" ? "Playing" : "Paused"} · ${esc(d.activity.audience || "shared audience")}</small></p>${!own ? `<button class="button small" id="profile-join">Join session</button>` : ""}` : `<p class="muted" style="font-size:12px">No session is currently shared with you.</p>`}</section></div><section class="card section"><div class="card-head"><h2>Friends</h2><span class="badge">${friends.length} FRIENDS</span></div><div class="people-list">${friends.map((p) => `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}</small></div></div>`).join("") || '<div class="empty">No friends added yet.</div>'}</div></section>${own ? `<section class="card section"><div class="card-head"><h2>Close Friends</h2><span class="badge">FRIENDS ONLY</span></div><p class="footer-note">Close Friends are selected from accounts you are friends with.</p><div id="profile-close-friends"></div></section><section class="card section"><h2>Activity privacy</h2><label class="label">Profile visibility</label><select class="select" id="visibility"><option value="everyone" ${u.visibility === "everyone" ? "selected" : ""}>Everyone</option><option value="followers" ${u.visibility === "followers" || u.visibility === "friends" ? "selected" : ""}>Friends only</option><option value="nobody" ${u.visibility === "nobody" ? "selected" : ""}>Nobody but you</option></select></section>` : ""}`,
+    `<div class="profile-head">${avatar(u)}<div class="grow"><span class="eyebrow">${own ? "YOUR PROFILE" : "LISTENER PROFILE"}</span><h1>${esc(u.name)}</h1><p>@${esc(u.username)}</p></div>${headerBtn}</div>${cornerRoomHtml}<div class="grid"><section class="card"><div class="card-head"><h2>About ${own ? "you" : esc(u.name)}</h2>${own ? '<button class="button secondary small" id="edit">Edit profile</button>' : ""}</div><p class="muted" style="font-size:13px">${esc(u.bio || "No bio yet.")}</p></section><section class="card"><div class="card-head"><h2>Listening now</h2><span class="badge">${d.cornerRoom ? "CORNER ROOM" : d.activity ? "SHARING" : "NOT SHARING"}</span></div>${d.cornerRoom ? `<p><b>${esc(d.cornerRoom.trackTitle || "Music")}</b><small class="subline">Private Room · Hosted by ${esc(u.name)}</small></p>${!own ? (d.cornerRoom.isMember ? `<a class="button small" href="#room/${esc(d.cornerRoom.id)}">Enter Room</a>` : d.cornerRoom.hasRequestedJoin ? `<button class="button secondary small" data-cancel-room-join="${esc(d.cornerRoom.id)}">⏳ Join Requested</button>` : `<button class="button small" data-request-room-join="${esc(d.cornerRoom.id)}">Request to Join</button>`) : `<a class="button small" href="#room/${esc(d.cornerRoom.id)}">Open Room View</a>`}` : d.activity ? `<p>${esc(d.activity.title || "YouTube video")}<small class="subline">${d.activity.playback === "playing" ? "Playing" : "Paused"} · ${esc(d.activity.audience || "shared audience")}</small></p>${!own ? `<button class="button small" id="profile-join">Join session</button>` : ""}` : `<p class="muted" style="font-size:12px">No session is currently shared with you.</p>`}</section></div><section class="card section"><div class="card-head"><h2>Friends</h2><span class="badge">${friends.length} FRIENDS</span></div><div class="people-list">${friends.map((p) => `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)}</small></div></div>`).join("") || '<div class="empty">No friends added yet.</div>'}</div></section>${own ? `<section class="card section"><div class="card-head"><h2>Close Friends</h2><span class="badge">FRIENDS ONLY</span></div><p class="footer-note">Close Friends are selected from accounts you are friends with.</p><div id="profile-close-friends"></div></section><section class="card section"><h2>Activity privacy</h2><label class="label">Profile visibility</label><select class="select" id="visibility"><option value="everyone" ${u.visibility === "everyone" ? "selected" : ""}>Everyone</option><option value="followers" ${u.visibility === "followers" || u.visibility === "friends" ? "selected" : ""}>Friends only</option><option value="nobody" ${u.visibility === "nobody" ? "selected" : ""}>Nobody but you</option></select></section>` : ""}`,
     "profile",
   );
   if (own) {
@@ -429,6 +546,7 @@ async function profile(username) {
     loadCloseFriends("#profile-close-friends");
   } else {
     bindFriendActions(() => profile(username));
+    bindRoomJoinActions(() => profile(username));
     document
       .querySelector("#profile-join")
       ?.addEventListener("click", async () => {
@@ -532,11 +650,14 @@ async function room(id) {
       : `https://www.youtube-nocookie.com/embed/${encodeURIComponent(q.videoId)}?enablejsapi=1&origin=${encodeURIComponent(location.origin)}`
     : "";
   frame(
-    `<div class="room-top"><div><span class="eyebrow">${r.isPrivate ? "PRIVATE ROOM" : "PUBLIC ROOM"}</span><h1>${esc(r.name)}</h1><span class="muted" style="font-size:11px">${r.members.length} ${r.members.length === 1 ? "member" : "members"} · ${r.host ? "Host" : "Member"} · Active</span></div>${r.host ? '<button class="button danger small" id="close-room">Close room</button>' : ""}<button class="button secondary small" id="leave">Leave room</button></div>${invite ? `<div class="card" style="margin-bottom:14px"><b>Invite people to this private room</b><div class="invite">${esc(invite)}</div><small class="subline">Share this code with people you want to join.</small></div>` : ""}${r.host && r.pauseRequests && r.pauseRequests.length > 0 ? `<div class="card" style="margin-bottom:14px;background:#2b1d16;border:1px solid #ff7f50;padding:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#ff9e7d;border-color:#ff7f50">PAUSE REQUEST</span><span style="margin-left:8px"><b>${esc(r.pauseRequests[0].userName)}</b> requested to pause the video.</span></div><div class="btn-group"><button class="button small" id="approve-pause" data-req="${esc(r.pauseRequests[0].id)}">✓ Allow Pause</button><button class="button secondary small" id="deny-pause" data-req="${esc(r.pauseRequests[0].id)}">✕ Deny</button></div></div></div>` : ""}<div class="room-layout"><div><section class="card"><div class="card-head"><h2>${q ? `<span style="vertical-align:middle">${esc(q.title)}</span><a href="${trackYoutubeUrl(q)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a>` : "Now playing"}</h2><span class="badge">${r.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${q ? (q.type === "playlist" ? `<iframe title="YouTube playlist" src="${embed}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>` : `<div id="yt-player"></div>`) : `<div class="player-placeholder">♫<b>No selection</b>Add a YouTube video or playlist.</div>`}</div><div class="members">${r.members.map((m) => `<span class="member-pill">${esc(m.user.name)}${m.role === "host" ? " · host" : ""}</span>`).join("")}</div>${r.host ? `<div class="track-form" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div class="btn-group"><button class="button secondary small" id="prev-track" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button small" id="playstate">${r.playback === "playing" ? "Pause" : "Play"}</button><button class="button secondary small" id="next-track" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>${q ? `<span class="muted" style="font-size:11px;align-self:center">Host playback active${currentIndex >= 0 ? ` · Track ${currentIndex + 1} of ${r.queue.length}` : ""}</span>` : ""}</div>` : `<div class="track-form">${r.playback === "playing" ? (r.myPauseRequest ? `<span class="badge warning">⏳ Pause Requested</span><button class="button secondary small" id="cancel-pause">Cancel Request</button><span class="muted" style="font-size:11px;align-self:center">Waiting for host approval...</span>` : `<button class="button secondary small" id="request-pause">⏸ Request Pause</button><span class="muted" style="font-size:11px;align-self:center">Video is host-driven. Request pause from host.</span>`) : `<span class="badge">PAUSED</span><span class="muted" style="font-size:11px;align-self:center">Playback is paused. Host controls resume.</span>`}</div>`}<form id="trackform" class="track-form"><input class="input" name="url" required placeholder="Paste a YouTube video or playlist link"><input class="input" name="title" maxlength="100" placeholder="Title (optional)"><button class="button">Add to queue</button></form><p class="footer-note">Playlist links play through YouTube’s embedded player. Video availability and autoplay depend on YouTube and your browser.</p></section><section class="card section"><div class="card-head" style="align-items:flex-end"><div class="tab-bar" style="margin-bottom:0;padding-bottom:0;border-bottom:none"><button class="tab-btn ${currentRoomTab === 'queue' ? 'active' : ''}" data-room-tab="queue">Queue <span class="tab-badge">${r.queue.length}</span></button><button class="tab-btn ${currentRoomTab === 'history' ? 'active' : ''}" data-room-tab="history">Played History <span class="tab-badge">${(r.history || []).length}</span></button></div><div style="display:flex;align-items:center;gap:8px">${currentRoomTab === 'queue' && r.host && r.queue.length > 0 ? `<div class="btn-group"><button class="button secondary small" id="queue-prev" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button secondary small" id="queue-next" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>` : ""}<span class="badge">${currentRoomTab === 'queue' ? `${r.queue.length} ${r.queue.length === 1 ? 'ITEM' : 'ITEMS'}` : `${(r.history || []).length} PLAYED`}</span></div></div>${currentRoomTab === 'queue' ? `<div class="track-list">${r.queue.map((x, i) => `<div class="track ${x.id === r.currentQueueId ? "active" : ""}" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Added by ${esc(x.by.name)}</small></span>${r.host ? `<button class="vote" data-play="${x.id}" title="Play this item">▶</button><button class="vote" data-remove="${x.id}" title="Remove">×</button>` : ""}<button class="vote" data-vote="${x.id}" data-value="${x.myVote === 1 ? 0 : 1}" title="Upvote">▲ ${x.votes}</button><button class="vote" data-vote="${x.id}" data-value="${x.myVote === -1 ? 0 : -1}" title="Downvote">▼</button></div>`).join("") || `<div class="empty">Add a video or playlist to start the queue.</div>`}</div>` : `<div class="track-list">${(r.history || []).map((x, i) => `<div class="track" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge" style="opacity:0.8">#${(r.history || []).length - i}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Played · Originally added by ${esc(x.by?.name || "Member")}${x.playedAt ? ` · ${new Date(x.playedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</small></span><div class="btn-group" style="margin-left:auto;gap:6px"><button class="button secondary small" data-requeue="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Add back to queue">+ Re-queue</button>${r.host ? `<button class="button small" data-play-history="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Play now">▶ Play</button>` : ""}</div></div>`).join("") || `<div class="empty">No songs played yet. Tracks played in this room will appear here.</div>`}</div>`}</section></div><section class="card chat-card"><div class="card-head"><h2>Room chat</h2><span class="badge">ROOM MEMBERS</span></div><div id="messages" class="chat-messages">${r.messages.map(messageHtml).join("") || `<div class="empty">No messages yet.</div>`}</div><form id="chatform" class="chat-form"><input class="input" name="text" maxlength="500" required placeholder="Write a message…"><button class="button small">Send</button></form><p class="footer-note">Room updates refresh every few seconds. Chat is visible only to members.</p></section></div>`,
+    `<div class="room-top"><div><span class="eyebrow">${r.isPrivate ? "PRIVATE ROOM" : "PUBLIC ROOM"}</span><h1>${esc(r.name)}</h1><span class="muted" style="font-size:11px">${r.members.length} ${r.members.length === 1 ? "member" : "members"} · ${r.host ? "Host" : "Member"} · Active</span></div><div class="btn-group"><button class="button secondary small" id="open-invite-modal" title="Invite friends to this room">✉ Invite Friends</button>${r.host ? '<button class="button danger small" id="close-room">Close room</button>' : ""}<button class="button secondary small" id="leave">Leave room</button></div></div>${invite ? `<div class="card" style="margin-bottom:14px"><b>Invite people to this private room</b><div class="invite">${esc(invite)}</div><small class="subline">Share this code with people you want to join.</small></div>` : ""}${r.host && r.joinRequests && r.joinRequests.length > 0 ? `<div class="card" style="margin-bottom:14px;background:#1a2b25;border:1px solid #2ecc71;padding:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#5cd68f;border-color:#2ecc71">JOIN REQUEST</span><span style="margin-left:8px"><b>${esc(r.joinRequests[0].userName)}</b> (@${esc(r.joinRequests[0].userHandle)}) requested to join this room.</span></div><div class="btn-group"><button class="button small" id="approve-join" data-req="${esc(r.joinRequests[0].id)}">✓ Allow Entry</button><button class="button secondary small" id="deny-join" data-req="${esc(r.joinRequests[0].id)}">✕ Deny</button></div></div></div>` : ""}${r.host && r.pauseRequests && r.pauseRequests.length > 0 ? `<div class="card" style="margin-bottom:14px;background:#2b1d16;border:1px solid #ff7f50;padding:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#ff9e7d;border-color:#ff7f50">PAUSE REQUEST</span><span style="margin-left:8px"><b>${esc(r.pauseRequests[0].userName)}</b> requested to pause the video.</span></div><div class="btn-group"><button class="button small" id="approve-pause" data-req="${esc(r.pauseRequests[0].id)}">✓ Allow Pause</button><button class="button secondary small" id="deny-pause" data-req="${esc(r.pauseRequests[0].id)}">✕ Deny</button></div></div></div>` : ""}<div class="room-layout"><div><section class="card"><div class="card-head"><h2>${q ? `<span style="vertical-align:middle">${esc(q.title)}</span><a href="${trackYoutubeUrl(q)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a>` : "Now playing"}</h2><span class="badge">${r.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${q ? (q.type === "playlist" ? `<iframe title="YouTube playlist" src="${embed}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>` : `<div id="yt-player"></div>`) : `<div class="player-placeholder">♫<b>No selection</b>Add a YouTube video or playlist.</div>`}</div><div class="members">${r.members.map((m) => `<span class="member-pill">${esc(m.user.name)}${m.role === "host" ? " · host" : ""}</span>`).join("")}</div>${r.host ? `<div class="track-form" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div class="btn-group"><button class="button secondary small" id="prev-track" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button small" id="playstate">${r.playback === "playing" ? "Pause" : "Play"}</button><button class="button secondary small" id="next-track" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>${q ? `<span class="muted" style="font-size:11px;align-self:center">Host playback active${currentIndex >= 0 ? ` · Track ${currentIndex + 1} of ${r.queue.length}` : ""}</span>` : ""}</div>` : `<div class="track-form">${r.playback === "playing" ? (r.myPauseRequest ? `<span class="badge warning">⏳ Pause Requested</span><button class="button secondary small" id="cancel-pause">Cancel Request</button><span class="muted" style="font-size:11px;align-self:center">Waiting for host approval...</span>` : `<button class="button secondary small" id="request-pause">⏸ Request Pause</button><span class="muted" style="font-size:11px;align-self:center">Video is host-driven. Request pause from host.</span>`) : `<span class="badge">PAUSED</span><span class="muted" style="font-size:11px;align-self:center">Playback is paused. Host controls resume.</span>`}</div>`}<form id="trackform" class="track-form"><input class="input" name="url" required placeholder="Paste a YouTube video or playlist link"><input class="input" name="title" maxlength="100" placeholder="Title (optional)"><button class="button">Add to queue</button></form><p class="footer-note">Playlist links play through YouTube’s embedded player. Video availability and autoplay depend on YouTube and your browser.</p></section><section class="card section"><div class="card-head" style="align-items:flex-end"><div class="tab-bar" style="margin-bottom:0;padding-bottom:0;border-bottom:none"><button class="tab-btn ${currentRoomTab === 'queue' ? 'active' : ''}" data-room-tab="queue">Queue <span class="tab-badge">${r.queue.length}</span></button><button class="tab-btn ${currentRoomTab === 'history' ? 'active' : ''}" data-room-tab="history">Played History <span class="tab-badge">${(r.history || []).length}</span></button></div><div style="display:flex;align-items:center;gap:8px">${currentRoomTab === 'queue' && r.host && r.queue.length > 0 ? `<div class="btn-group"><button class="button secondary small" id="queue-prev" title="Previous in queue"${!hasPrev ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏮ Prev</button><button class="button secondary small" id="queue-next" title="Next in queue"${!hasNext ? " disabled style='opacity:0.4;cursor:not-allowed'" : ""}>⏭ Next</button></div>` : ""}<span class="badge">${currentRoomTab === 'queue' ? `${r.queue.length} ${r.queue.length === 1 ? 'ITEM' : 'ITEMS'}` : `${(r.history || []).length} PLAYED`}</span></div></div>${currentRoomTab === 'queue' ? `<div class="track-list">${r.queue.map((x, i) => `<div class="track ${x.id === r.currentQueueId ? "active" : ""}" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Added by ${esc(x.by.name)}</small></span>${r.host ? `<button class="vote" data-play="${x.id}" title="Play this item">▶</button><button class="vote" data-remove="${x.id}" title="Remove">×</button>` : ""}<button class="vote" data-vote="${x.id}" data-value="${x.myVote === 1 ? 0 : 1}" title="Upvote">▲ ${x.votes}</button><button class="vote" data-vote="${x.id}" data-value="${x.myVote === -1 ? 0 : -1}" title="Downvote">▼</button></div>`).join("") || `<div class="empty">Add a video or playlist to start the queue.</div>`}</div>` : `<div class="track-list">${(r.history || []).map((x, i) => `<div class="track" data-track-id="${x.id}" title="${r.host ? "Click to play this video" : "Click to view video on YouTube"}"><span class="badge" style="opacity:0.8">#${(r.history || []).length - i}</span><span class="track-title">${x.type === "playlist" ? '<small class="queue-type">PLAYLIST · </small>' : ""}<a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-link" title="Open video in YouTube" onclick="event.stopPropagation()">${esc(x.title)}</a><a href="${trackYoutubeUrl(x)}" target="_blank" rel="noopener noreferrer" class="track-ext-link" title="Open video in YouTube" onclick="event.stopPropagation()">↗</a><small class="subline">Played · Originally added by ${esc(x.by?.name || "Member")}${x.playedAt ? ` · ${new Date(x.playedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</small></span><div class="btn-group" style="margin-left:auto;gap:6px"><button class="button secondary small" data-requeue="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Add back to queue">+ Re-queue</button>${r.host ? `<button class="button small" data-play-history="${esc(JSON.stringify({ type: x.type, videoId: x.videoId, playlistId: x.playlistId, title: x.title }))}" title="Play now">▶ Play</button>` : ""}</div></div>`).join("") || `<div class="empty">No songs played yet. Tracks played in this room will appear here.</div>`}</div>`}</section></div><section class="card chat-card"><div class="card-head"><h2>Room chat</h2><span class="badge">ROOM MEMBERS</span></div><div id="messages" class="chat-messages">${r.messages.map(messageHtml).join("") || `<div class="empty">No messages yet.</div>`}</div><form id="chatform" class="chat-form"><input class="input" name="text" maxlength="500" required placeholder="Write a message…"><button class="button small">Send</button></form><p class="footer-note">Room updates refresh every few seconds. Chat is visible only to members.</p></section></div>`,
     "",
   );
   if (q?.type === "video") startPlayer(r);
   if (invite) sessionStorage.removeItem("newInvite");
+  document.querySelector("#open-invite-modal")?.addEventListener("click", () => {
+    openInviteModal(id, r.name, r.code);
+  });
   document.querySelector("#close-room")?.addEventListener("click", async () => {
     try {
       await api(`/rooms/${id}/status`, {
@@ -558,6 +679,26 @@ async function room(id) {
       toast(e.message);
     }
   };
+  document.querySelector("#approve-join")?.addEventListener("click", async (e) => {
+    try {
+      const reqId = e.currentTarget.dataset.req;
+      await api(`/rooms/${id}/join-request/${reqId}/approve`, { method: "POST" });
+      toast("Allowed entry to room!");
+      await refreshRoom(id);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  document.querySelector("#deny-join")?.addEventListener("click", async (e) => {
+    try {
+      const reqId = e.currentTarget.dataset.req;
+      await api(`/rooms/${id}/join-request/${reqId}/deny`, { method: "POST" });
+      toast("Join request denied.");
+      await refreshRoom(id);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
   document.querySelector("#request-pause")?.addEventListener("click", async () => {
     try {
       await api(`/rooms/${id}/pause-request`, { method: "POST" });
@@ -823,7 +964,9 @@ async function refreshRoom(id, silent = false) {
       old.queue.length !== next.queue.length ||
       old.messages.length !== next.messages.length ||
       (old.history || []).length !== (next.history || []).length ||
-      (old.pauseRequests || []).length !== (next.pauseRequests || []).length
+      (old.pauseRequests || []).length !== (next.pauseRequests || []).length ||
+      (old.joinRequests || []).length !== (next.joinRequests || []).length ||
+      (old.members || []).length !== (next.members || []).length
     ) {
       const y = window.scrollY;
       room(id).then(() => window.scrollTo(0, y));
@@ -941,9 +1084,36 @@ async function corner() {
   const d = await api("/corner"),
     c = d.corner || {};
   frame(
-    `<div class="hero"><div><span class="eyebrow">YOUR PERSONAL LISTENING SPACE</span><h1>Your Corner</h1><p>Listen on your own. Share when you want friends to join.</p></div></div><div class="grid"><section class="card"><div class="card-head"><h2>${esc(c.title || "Now playing")}</h2><span class="badge">${c.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${c.videoId ? '<div id="yt-player"></div>' : '<div class="player-placeholder">♫<b>No selection</b>Paste a YouTube video link to begin.</div>'}</div><div id="player-error" class="footer-note" role="status"></div><form id="cornerform" class="track-form"><input class="input" name="url" placeholder="YouTube video URL or ID" required><input class="input" name="title" maxlength="100" placeholder="Song title (optional)"><button class="button" name="action" value="load">Load video</button><button class="button secondary" name="action" value="queue">Add to queue</button></form><div class="track-form"><button id="cornerplay" class="button small">${c.playback === "playing" ? "Pause" : "Play"}</button><label class="muted" style="font-size:12px;align-self:center">Seek</label><input id="seek" class="input" type="range" min="0" max="100" value="0"><span id="progress" class="muted" style="font-size:11px;align-self:center">0:00</span></div><div class="track-list section">${(c.queue || []).map((x, i) => `<div class="track ${x.videoId === c.videoId ? "active" : ""}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${esc(x.title)}</span>${x.videoId === c.videoId ? '<small class="muted">Now playing</small>' : '<button class="vote" data-corner-play="' + esc(x.id) + '" title="Play this track">▶</button>'}</div>`).join("") || '<div class="empty">Your queue is empty.</div>'}</div><button class="button secondary small" id="corner-next">Skip to next</button><p class="footer-note">YouTube playback stays in this browser. Autoplay may require clicking Play.</p></section><section class="card"><div class="card-head"><h2>Share Listening</h2><span class="badge">${esc(d.session && d.session.audience !== "off" ? "SHARING" : "OFF")}</span></div><p class="muted" style="font-size:12px">Choose who can discover and join your current video.</p><label class="label" for="audience">Audience</label><select class="select" id="audience"><option value="off">Off</option><option value="everyone">Everyone</option><option value="followers">Followers</option><option value="close-friends">Close Friends</option></select><p id="share-status" class="footer-note">${d.session ? `Session active · audience: ${esc(d.session.audience)}.` : "Your session is private."}</p>${d.session?.status === "active" ? `<a class="button secondary small" href="#session/${esc(d.session.id)}">Open session · ${d.session.participants?.length || 0} listeners</a>` : ""}<div id="close-friends"></div>${d.session?.status === "active" ? `<button class="button secondary small" id="endsession">End shared session</button>` : ""}</section></div>`,
+    `<div class="hero"><div><span class="eyebrow">YOUR PERSONAL LISTENING SPACE</span><h1>Your Corner</h1><p>Listen on your own. Share when you want friends to join.</p></div></div>${d.cornerJoinRequests && d.cornerJoinRequests.length > 0 ? `<div class="card" style="margin-bottom:14px;background:#1a2b25;border:1px solid #2ecc71;padding:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#5cd68f;border-color:#2ecc71">CORNER JOIN REQUEST</span><span style="margin-left:8px"><b>${esc(d.cornerJoinRequests[0].userName)}</b> (@${esc(d.cornerJoinRequests[0].userHandle)}) requested to join your corner room.</span></div><div class="btn-group"><button class="button small" id="approve-corner-join" data-room="${esc(d.cornerRoom?.id)}" data-req="${esc(d.cornerJoinRequests[0].id)}">✓ Allow Entry</button><button class="button secondary small" id="deny-corner-join" data-room="${esc(d.cornerRoom?.id)}" data-req="${esc(d.cornerJoinRequests[0].id)}">✕ Deny</button></div></div></div>` : ""}${d.cornerRoom ? `<div class="card" style="margin-bottom:14px;background:#161d27;border:1px solid #2b394a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px"><div><span class="badge" style="color:#60a5fa;border-color:#3b82f6">CORNER ROOM ACTIVE</span><span style="margin-left:8px;font-size:13px"><b>${esc(d.cornerRoom.name)}</b> · Private Code: <code style="color:#93c5fd;font-weight:600">${esc(d.cornerRoom.code)}</code> · ${d.cornerRoom.members.length} ${d.cornerRoom.members.length === 1 ? 'member' : 'members'}</span></div><div class="btn-group"><a class="button small" href="#room/${esc(d.cornerRoom.id)}">Open Room View</a><button class="button secondary small" id="corner-invite-btn">✉ Invite Friends</button></div></div>` : ""}<div class="grid"><section class="card"><div class="card-head"><h2>${esc(c.title || "Now playing")}</h2><span class="badge">${c.playback === "playing" ? "PLAYING" : "PAUSED"}</span></div><div class="player">${c.videoId ? '<div id="yt-player"></div>' : '<div class="player-placeholder">♫<b>No selection</b>Paste a YouTube video link to begin.</div>'}</div><div id="player-error" class="footer-note" role="status"></div><form id="cornerform" class="track-form"><input class="input" name="url" placeholder="YouTube video URL or ID" required><input class="input" name="title" maxlength="100" placeholder="Song title (optional)"><button class="button" name="action" value="load">Load video</button><button class="button secondary" name="action" value="queue">Add to queue</button></form><div class="track-form"><button id="cornerplay" class="button small">${c.playback === "playing" ? "Pause" : "Play"}</button><label class="muted" style="font-size:12px;align-self:center">Seek</label><input id="seek" class="input" type="range" min="0" max="100" value="0"><span id="progress" class="muted" style="font-size:11px;align-self:center">0:00</span></div><div class="track-list section">${(c.queue || []).map((x, i) => `<div class="track ${x.videoId === c.videoId ? "active" : ""}"><span class="badge">${String(i + 1).padStart(2, "0")}</span><span class="track-title">${esc(x.title)}</span>${x.videoId === c.videoId ? '<small class="muted">Now playing</small>' : '<button class="vote" data-corner-play="' + esc(x.id) + '" title="Play this track">▶</button>'}</div>`).join("") || '<div class="empty">Your queue is empty.</div>'}</div><button class="button secondary small" id="corner-next">Skip to next</button><p class="footer-note">YouTube playback stays in this browser. Autoplay may require clicking Play.</p></section><section class="card"><div class="card-head"><h2>Share Listening</h2><span class="badge">${esc(d.session && d.session.audience !== "off" ? "SHARING" : "OFF")}</span></div><p class="muted" style="font-size:12px">Choose who can discover and join your current video.</p><label class="label" for="audience">Audience</label><select class="select" id="audience"><option value="off">Off</option><option value="everyone">Everyone</option><option value="followers">Followers</option><option value="close-friends">Close Friends</option></select><p id="share-status" class="footer-note">${d.session ? `Session active · audience: ${esc(d.session.audience)}.` : "Your session is private."}</p>${d.session?.status === "active" ? `<a class="button secondary small" href="#session/${esc(d.session.id)}">Open session · ${d.session.participants?.length || 0} listeners</a>` : ""}<div id="close-friends"></div>${d.session?.status === "active" ? `<button class="button secondary small" id="endsession">End shared session</button>` : ""}</section></div>`,
     "corner",
   );
+  document.querySelector("#approve-corner-join")?.addEventListener("click", async (e) => {
+    try {
+      const roomId = e.currentTarget.dataset.room;
+      const reqId = e.currentTarget.dataset.req;
+      await api(`/rooms/${roomId}/join-request/${reqId}/approve`, { method: "POST" });
+      toast("Allowed entry to corner room!");
+      await corner();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  document.querySelector("#deny-corner-join")?.addEventListener("click", async (e) => {
+    try {
+      const roomId = e.currentTarget.dataset.room;
+      const reqId = e.currentTarget.dataset.req;
+      await api(`/rooms/${roomId}/join-request/${reqId}/deny`, { method: "POST" });
+      toast("Join request denied.");
+      await corner();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+  document.querySelector("#corner-invite-btn")?.addEventListener("click", () => {
+    if (d.cornerRoom) {
+      openInviteModal(d.cornerRoom.id, d.cornerRoom.name, d.cornerRoom.code);
+    }
+  });
   const audience = document.querySelector("#audience");
   audience.value = d.session?.audience || "off";
   if (c.videoId) startSocialPlayer(c.videoId, c, true);
@@ -1041,6 +1211,7 @@ async function corner() {
     await corner();
   });
   if (audience.value === "close-friends") loadCloseFriends();
+  let lastCornerPoll = Date.now();
   clearInterval(cornerTimer);
   cornerTimer = setInterval(() => {
     if (viewMode !== "corner") return;
@@ -1069,6 +1240,18 @@ async function corner() {
         method: "POST",
         body: JSON.stringify({ audience: a }),
       }).catch(() => {});
+    if (Date.now() - lastCornerPoll > 4000) {
+      lastCornerPoll = Date.now();
+      api("/corner").then((fresh) => {
+        const freshReqs = (fresh.cornerJoinRequests || []).length;
+        const oldReqs = (d.cornerJoinRequests || []).length;
+        const freshMembers = fresh.cornerRoom?.members?.length || 0;
+        const oldMembers = d.cornerRoom?.members?.length || 0;
+        if (freshReqs !== oldReqs || freshMembers !== oldMembers) {
+          corner();
+        }
+      }).catch(() => {});
+    }
   }, 2000);
 }
 async function loadCloseFriends(target = "#close-friends") {
@@ -1100,18 +1283,33 @@ let peopleTab = "suggested";
 let peopleSearchQuery = "";
 
 function accountCard(p) {
-  const status = p.activity
-    ? `${esc(p.activity.title || "YouTube video")} · ${p.activity.playback === "playing" ? "Playing" : "Paused"} · ${p.activity.audience}`
-    : p.isSelf
-      ? "This is your account"
-      : p.sharing
-        ? "Sharing with another audience"
-        : "Not sharing";
+  let status = "";
+  if (p.cornerRoom) {
+    status = `🎧 Listening: ${esc(p.cornerRoom.trackTitle || "Music")} · Private Room`;
+  } else if (p.activity) {
+    status = `${esc(p.activity.title || "YouTube video")} · ${p.activity.playback === "playing" ? "Playing" : "Paused"} · ${p.activity.audience}`;
+  } else if (p.isSelf) {
+    status = "This is your account";
+  } else if (p.sharing) {
+    status = "Sharing with another audience";
+  } else {
+    status = "Not sharing";
+  }
   const action = p.isSelf ? '<span class="badge">YOU</span>' : personActionBtn(p);
   const sessionBtn = p.activity?.sessionId
     ? `<button class="button small" data-session="${esc(p.activity.sessionId)}">Join</button>`
     : "";
-  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)} · ${status}</small></div><div class="card-actions">${action}${sessionBtn}</div></div>`;
+  let cornerBtn = "";
+  if (!p.isSelf && p.cornerRoom) {
+    if (p.cornerRoom.isMember) {
+      cornerBtn = `<a class="button small" href="#room/${esc(p.cornerRoom.id)}">Enter Room</a>`;
+    } else if (p.cornerRoom.hasRequestedJoin) {
+      cornerBtn = `<button class="button secondary small" data-cancel-room-join="${esc(p.cornerRoom.id)}">⏳ Requested</button>`;
+    } else {
+      cornerBtn = `<button class="button small" data-request-room-join="${esc(p.cornerRoom.id)}">Request to Join</button>`;
+    }
+  }
+  return `<div class="person-row">${avatar(p)}<div class="grow"><a href="#profile/${encodeURIComponent(p.username)}"><b>${esc(p.name)}</b></a><small>@${esc(p.username)} · ${status}</small></div><div class="card-actions">${action}${sessionBtn}${cornerBtn}</div></div>`;
 }
 
 function requestCard(r, isIncoming) {
@@ -1212,6 +1410,7 @@ async function peoples() {
   }
 
   bindFriendActions(peoples);
+  bindRoomJoinActions(peoples);
   bindPeopleSessionActions();
 
   clearInterval(poll);

@@ -21,6 +21,8 @@ const blank = () => ({
   roomPauseRequests: [],
   sessionPauseRequests: [],
   roomHistory: [],
+  roomJoinRequests: [],
+  roomInvites: [],
   rooms: [],
   members: [],
   queue: [],
@@ -42,6 +44,8 @@ function normalizeDb(value) {
     "roomPauseRequests",
     "sessionPauseRequests",
     "roomHistory",
+    "roomJoinRequests",
+    "roomInvites",
     "rooms",
     "members",
     "queue",
@@ -352,6 +356,38 @@ function formatPersonForViewer(person, viewer) {
         thumbnail: `https://i.ytimg.com/vi/${encodeURIComponent(active.videoId)}/hqdefault.jpg`,
       }
     : null;
+  const cornerRoom =
+    person.id === viewer.id
+      ? null
+      : db.rooms.find(
+          (rm) =>
+            rm.ownerId === person.id &&
+            rm.isCornerRoom &&
+            (rm.status || "active") === "active",
+        );
+  const isCornerMember = cornerRoom ? !!member(cornerRoom.id, viewer.id) : false;
+  const hasRequestedCorner = cornerRoom
+    ? (db.roomJoinRequests || []).some(
+        (jr) =>
+          jr.roomId === cornerRoom.id &&
+          jr.userId === viewer.id &&
+          jr.status === "pending",
+      )
+    : false;
+  const cornerRoomInfo = cornerRoom
+    ? {
+        id: cornerRoom.id,
+        name: cornerRoom.name,
+        isPrivate: !!cornerRoom.isPrivate,
+        trackTitle:
+          db.queue.find((q) => q.id === cornerRoom.currentQueueId)?.title ||
+          person.corner?.title ||
+          "Music playing",
+        playback: cornerRoom.playback || "paused",
+        isMember: isCornerMember,
+        hasRequestedJoin: hasRequestedCorner,
+      }
+    : null;
   return {
     ...safeUser(person),
     friendshipStatus,
@@ -359,6 +395,7 @@ function formatPersonForViewer(person, viewer) {
     following,
     isSelf: person.id === viewer.id,
     activity,
+    cornerRoom: cornerRoomInfo,
     sharing: !!visible,
   };
 }
@@ -403,8 +440,74 @@ function recordRoomHistory(r) {
     playedAt: Date.now(),
   });
 }
+function ensureCornerRoom(user, corner) {
+  if (!corner || !corner.videoId) return null;
+  let r = db.rooms.find(
+    (rm) =>
+      rm.ownerId === user.id &&
+      rm.isCornerRoom &&
+      (rm.status || "active") === "active",
+  );
+  if (!r) {
+    r = {
+      id: random(12),
+      name: `${user.name}'s Corner Room`,
+      isPrivate: true,
+      isCornerRoom: true,
+      ownerId: user.id,
+      code: random(6).toUpperCase().slice(0, 8),
+      createdAt: new Date().toISOString(),
+      status: "active",
+      playback: corner.playback || "playing",
+      playbackPosition: Number(corner.position) || 0,
+      playbackUpdatedAt: Date.now(),
+    };
+    db.rooms.push(r);
+  } else {
+    r.playback = corner.playback || "paused";
+    r.playbackPosition = Number(corner.position) || 0;
+    r.playbackUpdatedAt = Date.now();
+  }
+  if (!member(r.id, user.id)) {
+    db.members.push({ roomId: r.id, userId: user.id, role: "host" });
+  }
+
+  const queueItems =
+    corner.queue && corner.queue.length > 0
+      ? corner.queue
+      : [{ videoId: corner.videoId, title: corner.title }];
+  for (const item of queueItems) {
+    if (
+      item.videoId &&
+      !db.queue.some((q) => q.roomId === r.id && q.videoId === item.videoId)
+    ) {
+      db.queue.push({
+        id: random(10),
+        roomId: r.id,
+        type: "video",
+        videoId: item.videoId,
+        playlistId: null,
+        title: item.title || `YouTube video ${item.videoId}`,
+        by: safeUser(user),
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+  const currentInQueue = db.queue.find(
+    (q) => q.roomId === r.id && q.videoId === corner.videoId,
+  );
+  if (currentInQueue) {
+    r.currentQueueId = currentInQueue.id;
+    if (r.playback === "playing") {
+      recordRoomHistory(r);
+    }
+  }
+  user.cornerRoomId = r.id;
+  return r;
+}
 function roomView(r, viewer) {
-  const host = member(r.id, viewer.id)?.role === "host";
+  const isHost = member(r.id, viewer.id)?.role === "host";
+  const isUserMember = !!member(r.id, viewer.id);
   const nowPlaying = db.queue.find((q) => q.id === r.currentQueueId) || null;
   const pendingPauseRequests = (db.roomPauseRequests || [])
     .filter((pr) => pr.roomId === r.id && pr.status === "pending")
@@ -420,6 +523,26 @@ function roomView(r, viewer) {
       };
     });
   const myPauseRequest = pendingPauseRequests.find((pr) => pr.isMine) || null;
+  const pendingJoinRequests = (db.roomJoinRequests || [])
+    .filter((jr) => jr.roomId === r.id && jr.status === "pending")
+    .map((jr) => {
+      const u = db.users.find((x) => x.id === jr.userId);
+      return {
+        id: jr.id,
+        userId: jr.userId,
+        userName: u?.name || jr.userName || "User",
+        userUsername: u?.username || jr.userUsername || "",
+        createdAt: jr.createdAt,
+        isMine: jr.userId === viewer.id,
+      };
+    });
+  const myJoinRequest =
+    pendingJoinRequests.find((jr) => jr.isMine) ||
+    (db.roomJoinRequests || []).find(
+      (jr) =>
+        jr.roomId === r.id && jr.userId === viewer.id && jr.status === "pending",
+    ) ||
+    null;
   const history = (db.roomHistory || [])
     .filter((h) => h.roomId === r.id)
     .slice(-30)
@@ -428,7 +551,8 @@ function roomView(r, viewer) {
     id: r.id,
     name: r.name,
     isPrivate: r.isPrivate,
-    code: r.isPrivate ? undefined : undefined,
+    isCornerRoom: !!r.isCornerRoom,
+    code: isHost || isUserMember ? r.code : (r.isPrivate ? undefined : r.code),
     ownerId: r.ownerId,
     createdAt: r.createdAt,
     status: r.status || "active",
@@ -453,11 +577,13 @@ function roomView(r, viewer) {
           db.votes.find((v) => v.queueId === q.id && v.userId === viewer.id)
             ?.value || 0,
       })),
-    messages: db.messages.filter((m) => m.roomId === r.id).slice(-100),
-    host,
+    host: isHost,
+    isMember: isUserMember,
     nowPlaying,
     pauseRequests: pendingPauseRequests,
     myPauseRequest,
+    joinRequests: pendingJoinRequests,
+    myJoinRequest,
     history,
   };
 }
@@ -707,12 +833,16 @@ async function route(req, res) {
         const incomingCount = db.friendRequests.filter(
           (r) => r.to === user.id && r.status === "pending",
         ).length;
+        const incomingInvitesCount = (db.roomInvites || []).filter(
+          (inv) => inv.targetUserId === user.id && inv.status === "pending",
+        ).length;
         return send(res, 200, {
           user: safeUser(user),
           friends: friends.map((f) => f.id),
           friendsUsers: friends,
           friendsCount: friends.length,
           incomingRequestsCount: incomingCount,
+          incomingInvitesCount,
           following: friends.map((f) => f.id),
           followingUsers: friends,
           followers: friends.length,
@@ -759,15 +889,33 @@ async function route(req, res) {
       }
       if (p === "/api/corner" && method === "GET") {
         expireSessions();
+        const c = user.corner || {
+          videoId: null,
+          title: "",
+          playback: "paused",
+          position: 0,
+          updatedAt: Date.now(),
+          queue: [],
+        };
+        const cornerRoom = ensureCornerRoom(user, c);
+        const pendingJoinRequests = cornerRoom
+          ? (db.roomJoinRequests || [])
+              .filter((jr) => jr.roomId === cornerRoom.id && jr.status === "pending")
+              .map((jr) => {
+                const u = db.users.find((x) => x.id === jr.userId);
+                return {
+                  id: jr.id,
+                  userId: jr.userId,
+                  userName: u?.name || jr.userName || "User",
+                  userUsername: u?.username || "",
+                  createdAt: jr.createdAt,
+                };
+              })
+          : [];
         return send(res, 200, {
-          corner: user.corner || {
-            videoId: null,
-            title: "",
-            playback: "paused",
-            position: 0,
-            updatedAt: Date.now(),
-            queue: [],
-          },
+          corner: c,
+          cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
+          cornerJoinRequests: pendingJoinRequests,
           session: activeSessionFor(user.id),
           closeFriends: db.closeFriends
             .filter((f) => f.hostId === user.id)
@@ -805,8 +953,12 @@ async function route(req, res) {
           s.updatedAt = Date.now();
           s.playback = "paused";
         }
+        const cornerRoom = ensureCornerRoom(user, user.corner);
         await save();
-        return send(res, 200, { corner: user.corner });
+        return send(res, 200, {
+          corner: user.corner,
+          cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
+        });
       }
       if (p === "/api/corner/queue" && method === "POST") {
         const videoId = String(data.videoId || "").trim();
@@ -841,8 +993,12 @@ async function route(req, res) {
           c.playback = "paused";
         }
         c.updatedAt = Date.now();
+        const cornerRoom = ensureCornerRoom(user, c);
         await save();
-        return send(res, 201, { corner: c });
+        return send(res, 201, {
+          corner: c,
+          cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
+        });
       }
       if (p === "/api/corner/next" && method === "POST") {
         const c = user.corner || {};
@@ -868,8 +1024,12 @@ async function route(req, res) {
           s.updatedAt = c.updatedAt;
           s.hostSeenAt = Date.now();
         }
+        const cornerRoom = ensureCornerRoom(user, c);
         await save();
-        return send(res, 200, { corner: c });
+        return send(res, 200, {
+          corner: c,
+          cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
+        });
       }
       if (p === "/api/corner/play" && method === "POST") {
         const c =
@@ -906,9 +1066,11 @@ async function route(req, res) {
           s.updatedAt = c.updatedAt;
           s.hostSeenAt = Date.now();
         }
+        const cornerRoom = ensureCornerRoom(user, c);
         await save();
         return send(res, 200, {
           corner: c,
+          cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
           session: s ? sessionView(s, user) : null,
         });
       }
@@ -1429,6 +1591,7 @@ async function route(req, res) {
             (r.from === u.id && r.to === user.id),
         );
         const friends = getFriendsList(u.id);
+        const formatted = formatPersonForViewer(u, user);
         return send(res, 200, {
           user: safeUser(u),
           friendshipStatus,
@@ -1438,6 +1601,7 @@ async function route(req, res) {
           friends,
           followingUsers: friends,
           activity,
+          cornerRoom: formatted.cornerRoom,
         });
       }
       if (
@@ -1713,9 +1877,15 @@ async function route(req, res) {
         const code = String(data.code || "")
           .trim()
           .toUpperCase();
-        const r = db.rooms.find((x) => x.code === code);
+        const roomId = String(data.roomId || "").trim();
+        let r = null;
+        if (code) {
+          r = db.rooms.find((x) => x.code === code);
+        } else if (roomId) {
+          r = db.rooms.find((x) => x.id === roomId);
+        }
         if (!r)
-          throw Object.assign(new Error("Invitation code is invalid."), {
+          throw Object.assign(new Error("Room or invitation code is invalid."), {
             status: 404,
           });
         if ((r.status || "active") !== "active")
@@ -1725,10 +1895,258 @@ async function route(req, res) {
             ),
             { status: 409 },
           );
+        if (r.isPrivate && !member(r.id, user.id)) {
+          const hasApprovedRequest = (db.roomJoinRequests || []).some(
+            (jr) =>
+              jr.roomId === r.id &&
+              jr.userId === user.id &&
+              jr.status === "approved",
+          );
+          const hasInvite = (db.roomInvites || []).some(
+            (inv) => inv.roomId === r.id && inv.toUserId === user.id,
+          );
+          if (r.code !== code && !hasApprovedRequest && !hasInvite) {
+            throw Object.assign(
+              new Error(
+                "This is a private room. Please request to join or enter the invitation code.",
+              ),
+              { status: 403 },
+            );
+          }
+        }
         if (!member(r.id, user.id))
           db.members.push({ roomId: r.id, userId: user.id, role: "member" });
         await save();
         return send(res, 200, { room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/join-request$/)) &&
+        method === "POST"
+      ) {
+        const r = roomFor(m[1]);
+        if (!r || (r.status || "active") !== "active")
+          throw Object.assign(new Error("Room is not available."), {
+            status: 404,
+          });
+        if (member(r.id, user.id))
+          return send(res, 200, {
+            alreadyMember: true,
+            room: roomView(r, user),
+          });
+        const existing = (db.roomJoinRequests || []).find(
+          (jr) =>
+            jr.roomId === r.id &&
+            jr.userId === user.id &&
+            jr.status === "pending",
+        );
+        if (existing)
+          return send(res, 200, { request: existing, pending: true });
+        const jr = {
+          id: random(10),
+          roomId: r.id,
+          userId: user.id,
+          userName: user.name,
+          userUsername: user.username,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        };
+        db.roomJoinRequests.push(jr);
+        await save();
+        return send(res, 201, { request: jr, pending: true });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/join-request$/)) &&
+        method === "DELETE"
+      ) {
+        const r = roomFor(m[1]);
+        if (!r)
+          throw Object.assign(new Error("Room not found."), { status: 404 });
+        db.roomJoinRequests = (db.roomJoinRequests || []).filter(
+          (jr) =>
+            !(
+              jr.roomId === r.id &&
+              jr.userId === user.id &&
+              jr.status === "pending"
+            ),
+        );
+        await save();
+        return send(res, 200, { ok: true });
+      }
+      if (
+        (m = p.match(
+          /^\/api\/rooms\/([^/]+)\/join-request\/([^/]+)\/approve$/,
+        )) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the room host can approve join requests."),
+            { status: 403 },
+          );
+        const jr = (db.roomJoinRequests || []).find(
+          (x) => x.id === m[2] && x.roomId === r.id,
+        );
+        if (!jr)
+          throw Object.assign(new Error("Join request not found."), {
+            status: 404,
+          });
+        jr.status = "approved";
+        if (!member(r.id, jr.userId)) {
+          db.members.push({ roomId: r.id, userId: jr.userId, role: "member" });
+          const targetUser = db.users.find((u) => u.id === jr.userId);
+          db.messages.push({
+            id: random(10),
+            roomId: r.id,
+            user: { id: "system", name: "System" },
+            text: `${targetUser?.name || "A new member"} joined the room.`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        await save();
+        return send(res, 200, { ok: true, room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/join-request\/([^/]+)\/deny$/)) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        if (member(r.id, user.id)?.role !== "host")
+          throw Object.assign(
+            new Error("Only the room host can deny join requests."),
+            { status: 403 },
+          );
+        const jr = (db.roomJoinRequests || []).find(
+          (x) => x.id === m[2] && x.roomId === r.id,
+        );
+        if (!jr)
+          throw Object.assign(new Error("Join request not found."), {
+            status: 404,
+          });
+        jr.status = "denied";
+        await save();
+        return send(res, 200, { ok: true, room: roomView(r, user) });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/invite-candidates$/)) &&
+        method === "GET"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        const friends = getFriendsList(user.id);
+        const candidates = friends.map((f) => {
+          const inRoom = !!member(r.id, f.id);
+          const invited = (db.roomInvites || []).some(
+            (inv) =>
+              inv.roomId === r.id &&
+              inv.toUserId === f.id &&
+              inv.status === "pending",
+          );
+          return {
+            ...f,
+            inRoom,
+            invited,
+          };
+        });
+        return send(res, 200, { candidates, roomCode: r.code });
+      }
+      if (
+        (m = p.match(/^\/api\/rooms\/([^/]+)\/invite$/)) &&
+        method === "POST"
+      ) {
+        const r = requireActiveRoom(m[1], user);
+        const targetUserId = String(data.targetUserId || "").trim();
+        const targetUser = db.users.find((u) => u.id === targetUserId);
+        if (!targetUser)
+          throw Object.assign(new Error("User not found."), { status: 404 });
+        if (member(r.id, targetUser.id))
+          throw Object.assign(
+            new Error("User is already a member of this room."),
+            { status: 400 },
+          );
+        const existing = (db.roomInvites || []).find(
+          (inv) =>
+            inv.roomId === r.id &&
+            inv.toUserId === targetUser.id &&
+            inv.status === "pending",
+        );
+        if (existing) return send(res, 200, { invite: existing });
+        const inv = {
+          id: random(10),
+          roomId: r.id,
+          roomName: r.name,
+          fromUserId: user.id,
+          fromUserName: user.name,
+          toUserId: targetUser.id,
+          code: r.code,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        };
+        db.roomInvites.push(inv);
+        await save();
+        return send(res, 201, { invite: inv });
+      }
+      if (p === "/api/me/invites" && method === "GET") {
+        const invites = (db.roomInvites || [])
+          .filter((inv) => inv.toUserId === user.id && inv.status === "pending")
+          .map((inv) => {
+            const r = db.rooms.find((rm) => rm.id === inv.roomId);
+            return {
+              id: inv.id,
+              roomId: inv.roomId,
+              roomName: r?.name || inv.roomName || "Room",
+              fromUserName: inv.fromUserName,
+              createdAt: inv.createdAt,
+              roomStatus: r?.status || "closed",
+            };
+          })
+          .filter((inv) => inv.roomStatus === "active");
+        return send(res, 200, { invites });
+      }
+      if (
+        (m = p.match(/^\/api\/invites\/([^/]+)\/accept$/)) &&
+        method === "POST"
+      ) {
+        const inv = (db.roomInvites || []).find(
+          (x) => x.id === m[1] && x.toUserId === user.id,
+        );
+        if (!inv)
+          throw Object.assign(new Error("Invitation not found."), {
+            status: 404,
+          });
+        const r = roomFor(inv.roomId);
+        if (!r || (r.status || "active") !== "active")
+          throw Object.assign(
+            new Error("Room is closed or no longer available."),
+            { status: 410 },
+          );
+        inv.status = "accepted";
+        if (!member(r.id, user.id)) {
+          db.members.push({ roomId: r.id, userId: user.id, role: "member" });
+          db.messages.push({
+            id: random(10),
+            roomId: r.id,
+            user: { id: "system", name: "System" },
+            text: `${user.name} joined via invitation from ${inv.fromUserName}.`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        await save();
+        return send(res, 200, { ok: true, roomId: r.id });
+      }
+      if (
+        (m = p.match(/^\/api\/invites\/([^/]+)\/decline$/)) &&
+        method === "POST"
+      ) {
+        const inv = (db.roomInvites || []).find(
+          (x) => x.id === m[1] && x.toUserId === user.id,
+        );
+        if (!inv)
+          throw Object.assign(new Error("Invitation not found."), {
+            status: 404,
+          });
+        inv.status = "declined";
+        await save();
+        return send(res, 200, { ok: true });
       }
       if (
         (m = p.match(/^\/api\/rooms\/([^/]+)\/status$/)) &&
