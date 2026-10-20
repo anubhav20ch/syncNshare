@@ -356,36 +356,53 @@ function formatPersonForViewer(person, viewer) {
         thumbnail: `https://i.ytimg.com/vi/${encodeURIComponent(active.videoId)}/hqdefault.jpg`,
       }
     : null;
-  const cornerRoom =
-    person.id === viewer.id
-      ? null
-      : db.rooms.find(
-          (rm) =>
-            rm.ownerId === person.id &&
-            rm.isCornerRoom &&
-            (rm.status || "active") === "active",
-        );
-  const isCornerMember = cornerRoom ? !!member(cornerRoom.id, viewer.id) : false;
-  const hasRequestedCorner = cornerRoom
+  const canSeePrivate = canSeeActivity(person, viewer);
+  const activePrivateRoom = canSeePrivate
+    ? (db.rooms.find(
+        (rm) =>
+          rm.isPrivate &&
+          (rm.status || "active") === "active" &&
+          rm.ownerId === person.id,
+      ) ||
+      db.rooms.find(
+        (rm) =>
+          rm.isPrivate &&
+          (rm.status || "active") === "active" &&
+          member(rm.id, person.id),
+      ))
+    : null;
+  const isPrivateMember = activePrivateRoom ? !!member(activePrivateRoom.id, viewer.id) : false;
+  const hasRequestedPrivate = activePrivateRoom
     ? (db.roomJoinRequests || []).some(
         (jr) =>
-          jr.roomId === cornerRoom.id &&
+          jr.roomId === activePrivateRoom.id &&
           jr.userId === viewer.id &&
           jr.status === "pending",
       )
     : false;
-  const cornerRoomInfo = cornerRoom
+  const currentQueueItem = activePrivateRoom
+    ? db.queue.find((q) => q.id === activePrivateRoom.currentQueueId)
+    : null;
+  const roomOwner = activePrivateRoom
+    ? db.users.find((u) => u.id === activePrivateRoom.ownerId)
+    : null;
+  const privateRoomInfo = activePrivateRoom
     ? {
-        id: cornerRoom.id,
-        name: cornerRoom.name,
-        isPrivate: !!cornerRoom.isPrivate,
+        id: activePrivateRoom.id,
+        name: activePrivateRoom.name,
+        isPrivate: true,
+        isCornerRoom: !!activePrivateRoom.isCornerRoom,
         trackTitle:
-          db.queue.find((q) => q.id === cornerRoom.currentQueueId)?.title ||
-          person.corner?.title ||
-          "Music playing",
-        playback: cornerRoom.playback || "paused",
-        isMember: isCornerMember,
-        hasRequestedJoin: hasRequestedCorner,
+          currentQueueItem?.title ||
+          (activePrivateRoom.isCornerRoom ? person.corner?.title : null) ||
+          "Private listening session",
+        playback: activePrivateRoom.playback || "paused",
+        isMember: isPrivateMember,
+        hasRequestedJoin: hasRequestedPrivate,
+        ownerId: activePrivateRoom.ownerId,
+        hostName: roomOwner?.name || "Host",
+        hostUsername: roomOwner?.username || "",
+        isHost: activePrivateRoom.ownerId === person.id,
       }
     : null;
   return {
@@ -395,7 +412,8 @@ function formatPersonForViewer(person, viewer) {
     following,
     isSelf: person.id === viewer.id,
     activity,
-    cornerRoom: cornerRoomInfo,
+    cornerRoom: privateRoomInfo,
+    privateRoom: privateRoomInfo,
     sharing: !!visible,
   };
 }
@@ -529,9 +547,11 @@ function roomView(r, viewer) {
       const u = db.users.find((x) => x.id === jr.userId);
       return {
         id: jr.id,
+        roomId: r.id,
         userId: jr.userId,
         userName: u?.name || jr.userName || "User",
         userUsername: u?.username || jr.userUsername || "",
+        userHandle: u?.username || jr.userUsername || "",
         createdAt: jr.createdAt,
         isMine: jr.userId === viewer.id,
       };
@@ -898,20 +918,31 @@ async function route(req, res) {
           queue: [],
         };
         const cornerRoom = ensureCornerRoom(user, c);
-        const pendingJoinRequests = cornerRoom
-          ? (db.roomJoinRequests || [])
-              .filter((jr) => jr.roomId === cornerRoom.id && jr.status === "pending")
-              .map((jr) => {
-                const u = db.users.find((x) => x.id === jr.userId);
-                return {
-                  id: jr.id,
-                  userId: jr.userId,
-                  userName: u?.name || jr.userName || "User",
-                  userUsername: u?.username || "",
-                  createdAt: jr.createdAt,
-                };
-              })
-          : [];
+        const hostRoomIds = new Set(
+          db.rooms
+            .filter(
+              (rm) =>
+                rm.ownerId === user.id &&
+                (rm.status || "active") === "active",
+            )
+            .map((rm) => rm.id),
+        );
+        const pendingJoinRequests = (db.roomJoinRequests || [])
+          .filter((jr) => hostRoomIds.has(jr.roomId) && jr.status === "pending")
+          .map((jr) => {
+            const u = db.users.find((x) => x.id === jr.userId);
+            const rm = db.rooms.find((x) => x.id === jr.roomId);
+            return {
+              id: jr.id,
+              roomId: jr.roomId,
+              roomName: rm?.name || "Private Room",
+              userId: jr.userId,
+              userName: u?.name || jr.userName || "User",
+              userUsername: u?.username || "",
+              userHandle: u?.username || "",
+              createdAt: jr.createdAt,
+            };
+          });
         return send(res, 200, {
           corner: c,
           cornerRoom: cornerRoom ? roomView(cornerRoom, user) : null,
@@ -1833,22 +1864,75 @@ async function route(req, res) {
         await save();
         return send(res, 200, { ok: true, status: "none" });
       }
-      if (p === "/api/rooms" && method === "GET")
+      if (p === "/api/rooms" && method === "GET") {
+        const hostRoomIds = new Set(
+          db.rooms
+            .filter(
+              (rm) =>
+                rm.ownerId === user.id &&
+                (rm.status || "active") === "active",
+            )
+            .map((rm) => rm.id),
+        );
+        const hostJoinRequests = (db.roomJoinRequests || [])
+          .filter((jr) => hostRoomIds.has(jr.roomId) && jr.status === "pending")
+          .map((jr) => {
+            const u = db.users.find((x) => x.id === jr.userId);
+            const rm = db.rooms.find((x) => x.id === jr.roomId);
+            return {
+              id: jr.id,
+              roomId: jr.roomId,
+              roomName: rm?.name || "Private Room",
+              userId: jr.userId,
+              userName: u?.name || jr.userName || "User",
+              userUsername: u?.username || "",
+              userHandle: u?.username || "",
+              createdAt: jr.createdAt,
+            };
+          });
         return send(res, 200, {
+          hostJoinRequests,
           rooms: db.rooms
-            .filter((r) => !r.isPrivate || !!member(r.id, user.id))
-            .map((r) => ({
-              id: r.id,
-              name: r.name,
-              isPrivate: !!r.isPrivate,
-              status: r.status || "active",
-              isHost: member(r.id, user.id)?.role === "host",
-              isMember: !!member(r.id, user.id),
-              members: db.members.filter((m) => m.roomId === r.id).length,
-              track:
-                db.queue.find((q) => q.id === r.currentQueueId)?.title || null,
-            })),
+            .filter((r) => {
+              if (!r.isPrivate) return true;
+              if (member(r.id, user.id)) return true;
+              return (
+                areFriends(r.ownerId, user.id) ||
+                db.members.some(
+                  (m) => m.roomId === r.id && areFriends(m.userId, user.id),
+                )
+              );
+            })
+            .map((r) => {
+              const hostUser = db.users.find((u) => u.id === r.ownerId);
+              const friendMember = db.members
+                .filter((m) => m.roomId === r.id && areFriends(m.userId, user.id))
+                .map((m) => db.users.find((u) => u.id === m.userId)?.name)
+                .filter(Boolean)[0];
+              return {
+                id: r.id,
+                name: r.name,
+                isPrivate: !!r.isPrivate,
+                isCornerRoom: !!r.isCornerRoom,
+                hostName: hostUser?.name || "Host",
+                hostUsername: hostUser?.username || "",
+                friendMemberName: friendMember || null,
+                status: r.status || "active",
+                isHost: member(r.id, user.id)?.role === "host",
+                isMember: !!member(r.id, user.id),
+                hasRequestedJoin: (db.roomJoinRequests || []).some(
+                  (jr) =>
+                    jr.roomId === r.id &&
+                    jr.userId === user.id &&
+                    jr.status === "pending",
+                ),
+                members: db.members.filter((m) => m.roomId === r.id).length,
+                track:
+                  db.queue.find((q) => q.id === r.currentQueueId)?.title || null,
+              };
+            }),
         });
+      }
       if (p === "/api/rooms" && method === "POST") {
         const name = String(data.name || "").trim();
         if (!name || name.length > 60)
