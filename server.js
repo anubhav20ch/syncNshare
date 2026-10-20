@@ -276,6 +276,17 @@ function createSession(userId) {
   return token;
 }
 function safeUser(u) {
+  if (!u) {
+    return {
+      id: "",
+      username: "unknown",
+      name: "User",
+      bio: "",
+      avatar: "",
+      visibility: "everyone",
+      createdAt: "",
+    };
+  }
   return {
     id: u.id,
     username: u.username,
@@ -567,6 +578,9 @@ function roomView(r, viewer) {
     .filter((h) => h.roomId === r.id)
     .slice(-30)
     .reverse();
+  const messages = (db.messages || [])
+    .filter((m) => m.roomId === r.id)
+    .slice(-100);
   return {
     id: r.id,
     name: r.name,
@@ -597,6 +611,7 @@ function roomView(r, viewer) {
           db.votes.find((v) => v.queueId === q.id && v.userId === viewer.id)
             ?.value || 0,
       })),
+    messages,
     host: isHost,
     isMember: isUserMember,
     nowPlaying,
